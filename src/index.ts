@@ -316,6 +316,15 @@ function setupPeriodicHealthChecks(): void {
     }
   }, 30 * 60 * 1000); // Every 30 minutes
 
+  // Account refresh every 10 minutes (NEW)
+  setInterval(async () => {
+    try {
+      await getEmailAccounts();
+    } catch (error) {
+      logger.error('Account refresh failed', error as Error);
+    }
+  }, 10 * 60 * 1000); // Every 10 minutes
+
   // Performance metrics every 5 minutes
   setInterval(async () => {
     try {
