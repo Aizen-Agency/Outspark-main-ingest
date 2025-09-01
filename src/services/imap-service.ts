@@ -667,6 +667,19 @@ export class IMAPService {
         }
       }
 
+      // Also check for accounts that have clients but are in bad state
+      for (const [accountId, client] of this.clients) {
+        try {
+          // Quick validation of existing connections
+          await client.noop();
+        } catch (error) {
+          logger.debug(`Found bad connection for ${accountId}, marking for reconnection`);
+          accountsToReconnect.push(accountId);
+          // Mark as error status
+          await this.updateConnectionStatus(accountId, ConnectionStatus.ERROR, 'Connection validation failed');
+        }
+      }
+
       // Also check database for accounts that might not be in memory
       try {
         const { supabaseDatabaseService } = await import('./supabase-database.service');
@@ -697,21 +710,62 @@ export class IMAPService {
   async reconnectAccounts(accountIds: string[], accounts: EmailAccountsCredentials[]): Promise<void> {
     logger.info(`Attempting to reconnect ${accountIds.length} accounts`);
     
+    const failedReconnections: string[] = [];
+    
     for (const accountId of accountIds) {
       try {
-        // Remove existing connection if any
-        await this.removeAccount(accountId);
+        // Clean up any existing bad connections first
+        await this.cleanupBadConnection(accountId);
         
         // Find account in the provided accounts array
         const account = accounts.find(acc => acc.id === accountId);
         
         if (account && account.isActive) {
           await this.initializeAccountFromDB(account);
+          logger.info(`Successfully reconnected account ${accountId}`);
+        } else {
+          logger.warn(`Account ${accountId} not found or inactive, skipping reconnection`);
         }
       } catch (error) {
         logger.error(`Failed to reconnect account ${accountId}:`, error as Error);
-        throw error;
+        failedReconnections.push(accountId);
+        // Don't throw error to allow other accounts to be reconnected
       }
+    }
+    
+    if (failedReconnections.length > 0) {
+      logger.warn(`Failed to reconnect ${failedReconnections.length} accounts:`, failedReconnections);
+    }
+    
+    logger.info(`Reconnection attempt completed. Success: ${accountIds.length - failedReconnections.length}, Failed: ${failedReconnections.length}`);
+  }
+
+  /**
+   * Clean up bad connections without throwing errors
+   */
+  private async cleanupBadConnection(accountId: string): Promise<void> {
+    const client = this.clients.get(accountId);
+    if (client) {
+      this.idleConnections.set(accountId, false);
+      try {
+        // Try to logout, but handle connection errors gracefully
+        await client.logout();
+      } catch (error) {
+        // Handle "Connection not available" error gracefully
+        if (error instanceof Error && error.message.includes('Connection not available')) {
+          logger.debug(`Connection not available for ${accountId}, proceeding with cleanup`);
+        } else {
+          logger.debug(`Error during client cleanup for ${accountId}:`, error as Error);
+        }
+        // Don't throw error for connection issues during cleanup
+      }
+      
+      // Always cleanup regardless of logout success
+      this.clients.delete(accountId);
+      this.idleConnections.delete(accountId);
+      
+      await this.updateConnectionStatus(accountId, ConnectionStatus.DISCONNECTED);
+      logger.debug(`Account ${accountId} cleaned up`);
     }
   }
 
@@ -723,12 +777,20 @@ export class IMAPService {
     if (client) {
       this.idleConnections.set(accountId, false);
       try {
+        // Try to logout, but handle connection errors gracefully
         await client.logout();
         // await client.destroy();
       } catch (error) {
-        logger.warn(`Error during client cleanup for ${accountId}:`, error as Error);
-        throw error;
+        // Handle "Connection not available" error gracefully
+        if (error instanceof Error && error.message.includes('Connection not available')) {
+          logger.debug(`Connection not available for ${accountId}, proceeding with cleanup`);
+        } else {
+          logger.warn(`Error during client cleanup for ${accountId}:`, error as Error);
+        }
+        // Don't throw error for connection issues during cleanup
       }
+      
+      // Always cleanup regardless of logout success
       this.clients.delete(accountId);
       this.idleConnections.delete(accountId);
       
@@ -754,6 +816,16 @@ export class IMAPService {
   async healthCheck(): Promise<boolean> {
     try {
       let healthyConnections = 0;
+      const totalConnections = this.clients.size;
+      
+      if (totalConnections === 0) {
+        logger.warn('No IMAP connections available for health check');
+        logMetric('imap_health_check', 0, { 
+          healthy: 'unhealthy', 
+          total: '0' 
+        });
+        return false;
+      }
       
       for (const [accountId, client] of this.clients) {
         // Check if connection works (regardless of IDLE status)
@@ -762,14 +834,18 @@ export class IMAPService {
           healthyConnections++;
         } catch (error) {
           logger.warn('Account health check failed', { accountId, error });
+          // Mark this connection as needing reconnection
+          await this.updateConnectionStatus(accountId, ConnectionStatus.ERROR, error instanceof Error ? error.message : String(error));
         }
       }
       
       const healthStatus = healthyConnections > 0;
       logMetric('imap_health_check', healthStatus ? 1 : 0, { 
         healthy: healthyConnections ? 'healthy' : 'unhealthy', 
-        total: this.clients.size.toString() 
+        total: totalConnections.toString() 
       });
+      
+      logger.debug(`IMAP health check completed: ${healthyConnections}/${totalConnections} connections healthy`);
       
       return healthStatus;
     } catch (error) {
@@ -791,10 +867,30 @@ export class IMAPService {
     }
     
     try {
-      await Promise.allSettled(shutdownPromises);
-      logger.info('IMAP service shutdown completed');
+      const results = await Promise.allSettled(shutdownPromises);
+      const successful = results.filter(result => result.status === 'fulfilled').length;
+      const failed = results.filter(result => result.status === 'rejected').length;
+      
+      logger.info('IMAP service shutdown completed', { 
+        successful, 
+        failed, 
+        total: this.clients.size 
+      });
     } catch (error) {
       logError('Error during IMAP service shutdown', error as Error);
+    }
+  }
+
+  /**
+   * Validate if a connection is still active and usable
+   */
+  private async validateConnection(accountId: string, client: any): Promise<boolean> {
+    try {
+      await client.noop();
+      return true;
+    } catch (error) {
+      logger.debug(`Connection validation failed for ${accountId}:`, error as Error);
+      return false;
     }
   }
 
@@ -817,3 +913,4 @@ export class IMAPService {
 
 // Export singleton instance
 export const imapService = new IMAPService();
+
