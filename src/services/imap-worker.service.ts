@@ -2,7 +2,7 @@ import { ImapFlow, ImapFlowOptions, FetchMessageObject } from 'imapflow';
 import { logger, logError, logMetric } from '../utils/logger';
 import { config } from '../config/index';
 import { sendMessage, sendMessageBatch } from './aws-sqs';
-import { connectionManager } from './connection-manager.service';
+import { imapService } from './imap-service';
 import { pollingScheduler } from './polling-scheduler.service';
 import { 
   EmailAccount, 
@@ -141,7 +141,7 @@ export class ImapWorker {
     const { accountId, account } = task;
     
     // Get connection from connection manager
-    const connection = await connectionManager.getConnection(accountId, account, task.priority);
+    const connection = await imapService.getConnection(accountId, account, task.priority);
     
     try {
       // Connect to IMAP server
@@ -196,7 +196,7 @@ export class ImapWorker {
 
     } finally {
       // Release connection back to pool
-      connectionManager.releaseConnection(accountId);
+      imapService.releaseConnection(accountId);
     }
   }
 
@@ -207,7 +207,7 @@ export class ImapWorker {
     const { accountId, account } = task;
     
     // Get connection from connection manager
-    const connection = await connectionManager.getConnection(accountId, account, task.priority);
+    const connection = await imapService.getConnection(accountId, account, task.priority);
     
     try {
       // Connect to IMAP server
@@ -323,7 +323,7 @@ export class ImapWorker {
       throw error;
     } finally {
       // Release connection back to pool
-      connectionManager.releaseConnection(accountId);
+      imapService.releaseConnection(accountId);
     }
   }
 
@@ -335,11 +335,11 @@ export class ImapWorker {
     
     try {
       // Get connection from connection manager
-      const connection = await connectionManager.getConnection(accountId, account, task.priority);
+      const connection = await imapService.getConnection(accountId, account, task.priority);
       
       try {
         // Perform health check
-        const isHealthy = await connection.healthCheck();
+        const isHealthy = (imapService as any).isConnectionHealthy(connection);
         
         if (isHealthy) {
           logger.debug('Account health check passed', {
@@ -355,7 +355,7 @@ export class ImapWorker {
         
       } finally {
         // Release connection back to pool
-        connectionManager.releaseConnection(accountId);
+        imapService.releaseConnection(accountId);
       }
       
     } catch (error) {

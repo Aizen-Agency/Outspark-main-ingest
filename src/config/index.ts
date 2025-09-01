@@ -53,6 +53,17 @@ export const config: ServiceConfig = {
     healthCheckPort: parseInt(process.env.HEALTH_CHECK_PORT || '8080'),
     metricsInterval: parseInt(process.env.METRICS_INTERVAL || '60000'), // 1 minute
   },
+  
+  // Connection settings
+  connection: {
+    maxRetries: 3,
+    retryDelay: 5000, // 5 seconds
+    connectionTimeout: 30000, // 30 seconds
+    idleTimeout: 30000, // 30 seconds for IDLE
+    noopInterval: 30000, // 30 seconds for NOOP
+    maxIdleFailures: 3, // Max IDLE failures before falling back to polling
+    pollingInterval: 30000, // 30 seconds for polling fallback
+  },
 };
 
 export const loggerConfig: LoggerConfig = {

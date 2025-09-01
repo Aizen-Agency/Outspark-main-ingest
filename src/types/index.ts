@@ -216,6 +216,17 @@ export interface ServiceConfig {
     healthCheckPort: number;
     metricsInterval: number;
   };
+  
+  // Connection settings
+  connection: {
+    maxRetries: number;
+    retryDelay: number;
+    connectionTimeout: number;
+    idleTimeout: number;
+    noopInterval: number;
+    maxIdleFailures: number;
+    pollingInterval: number;
+  };
 }
 
 export interface HealthStatus {

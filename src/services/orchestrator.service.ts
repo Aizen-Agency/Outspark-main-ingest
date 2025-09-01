@@ -3,8 +3,8 @@ import { logger, logError, logMetric } from '../utils/logger';
 import { config } from '../config/index';
 import { EmailAccountsCredentials } from '../types/index';
 import { workerPool } from './worker-pool.service';
-import { connectionManager } from './connection-manager.service';
 import { pollingScheduler } from './polling-scheduler.service';
+import { imapService } from './imap-service';
 import { ImapWorker } from './imap-worker.service';
 
 export interface OrchestratorStats {
@@ -333,7 +333,7 @@ export class OrchestratorService extends EventEmitter {
     const activeWorkers = workerStats.filter(w => w.currentTask).length;
     
     // Get connection stats
-    const connectionMetrics = connectionManager.getMetrics();
+    const connectionMetrics = imapService.getMetrics();
     
     // Get polling stats
     const pollingMetrics = pollingScheduler.getMetrics();
@@ -387,7 +387,7 @@ export class OrchestratorService extends EventEmitter {
    */
   getPerformanceMetrics(): Record<string, any> {
     const workerStats = Array.from(this.workers.values()).map(w => w.getStats());
-    const connectionMetrics = connectionManager.getMetrics();
+    const connectionMetrics = imapService.getMetrics();
     const pollingMetrics = pollingScheduler.getMetrics();
     
     return {
@@ -425,7 +425,6 @@ export class OrchestratorService extends EventEmitter {
     // Shutdown all services
     await Promise.all([
       workerPool.shutdown(),
-      connectionManager.shutdown(),
       pollingScheduler.shutdown()
     ]);
     

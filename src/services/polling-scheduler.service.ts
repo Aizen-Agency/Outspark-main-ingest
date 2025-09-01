@@ -3,7 +3,6 @@ import { logger, logError, logMetric } from '../utils/logger';
 import { config } from '../config/index';
 import { EmailAccountsCredentials } from '../types/index';
 import { workerPool } from './worker-pool.service';
-import { connectionManager } from './connection-manager.service';
 
 export interface PollingSchedule {
   accountId: string;
