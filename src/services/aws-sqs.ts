@@ -57,7 +57,7 @@ export async function sendMessage(payload: QueuePayload): Promise<string> {
           DataType: 'String',
         },
         'ThreadId': {
-          StringValue: payload.data.threadId || '',
+          StringValue: payload.data.threadId || 'no-thread',
           DataType: 'String',
         },
         'IsReply': {
@@ -138,7 +138,7 @@ export async function sendMessageBatch(payloads: QueuePayload[]): Promise<string
           DataType: 'String',
         },
         'ThreadId': {
-          StringValue: payload.data.threadId || '',
+          StringValue: payload.data.threadId || 'no-thread',
           DataType: 'String',
         },
         'IsReply': {
