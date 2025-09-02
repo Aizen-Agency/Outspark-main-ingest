@@ -144,8 +144,22 @@ export class ImapWorker {
     const connection = await imapService.getConnection(accountId, account, task.priority);
     
     try {
-      // Connect to IMAP server
-      await connection.connect();
+      // Validate connection before attempting operations
+      if (!this.isConnectionValid(connection)) {
+        throw new Error('Connection is not valid or ready');
+      }
+      
+      // Check if connection is already connected, if not connect
+      try {
+        // Try a simple operation to test if connection is alive
+        await connection.noop();
+        logger.debug('Connection is already active', { workerId: this.workerId, accountId });
+      } catch (error) {
+        // Connection is not active, try to connect
+        logger.debug('Connection not active, attempting to connect', { workerId: this.workerId, accountId });
+        await connection.connect();
+        logger.debug('Connection established successfully', { workerId: this.workerId, accountId });
+      }
       
       // Open INBOX
       const lock = await connection.getMailboxLock('INBOX');
@@ -194,6 +208,17 @@ export class ImapWorker {
         lock.release();
       }
 
+    } catch (error) {
+      // Log the specific error for debugging
+      logger.error('Polling task failed', {
+        workerId: this.workerId,
+        accountId,
+        error: error instanceof Error ? error.message : String(error),
+        errorCode: (error as any)?.code || 'unknown'
+      });
+      
+      // Re-throw the error to be handled by the scheduler
+      throw error;
     } finally {
       // Release connection back to pool
       imapService.releaseConnection(accountId);
@@ -210,8 +235,22 @@ export class ImapWorker {
     const connection = await imapService.getConnection(accountId, account, task.priority);
     
     try {
-      // Connect to IMAP server
-      await connection.connect();
+      // Validate connection before attempting operations
+      if (!this.isConnectionValid(connection)) {
+        throw new Error('Connection is not valid or ready');
+      }
+      
+      // Check if connection is already connected, if not connect
+      try {
+        // Try a simple operation to test if connection is alive
+        await connection.noop();
+        logger.debug('Connection is already active for IDLE', { workerId: this.workerId, accountId });
+      } catch (error) {
+        // Connection is not active, try to connect
+        logger.debug('Connection not active for IDLE, attempting to connect', { workerId: this.workerId, accountId });
+        await connection.connect();
+        logger.debug('Connection established successfully for IDLE', { workerId: this.workerId, accountId });
+      }
       
       // Open INBOX
       const lock = await connection.getMailboxLock('INBOX');
@@ -314,7 +353,8 @@ export class ImapWorker {
       logger.error('IDLE task failed', {
         workerId: this.workerId,
         accountId,
-        error
+        error: error instanceof Error ? error.message : String(error),
+        errorCode: (error as any)?.code || 'unknown'
       });
       
       // Notify scheduler that IDLE failed
@@ -338,19 +378,25 @@ export class ImapWorker {
       const connection = await imapService.getConnection(accountId, account, task.priority);
       
       try {
-        // Perform health check
-        const isHealthy = (imapService as any).isConnectionHealthy(connection);
+        // Validate connection before attempting operations
+        if (!this.isConnectionValid(connection)) {
+          throw new Error('Connection is not valid or ready');
+        }
         
-        if (isHealthy) {
+        // Perform health check by trying a NOOP command
+        try {
+          await connection.noop();
           logger.debug('Account health check passed', {
             workerId: this.workerId,
             accountId
           });
-        } else {
-          logger.warn('Account health check failed', {
+        } catch (error) {
+          logger.warn('Account health check failed - NOOP command failed', {
             workerId: this.workerId,
-            accountId
+            accountId,
+            error: error instanceof Error ? error.message : String(error)
           });
+          throw error;
         }
         
       } finally {
@@ -362,10 +408,26 @@ export class ImapWorker {
       logger.error('Health check task failed', {
         workerId: this.workerId,
         accountId,
-        error
+        error: error instanceof Error ? error.message : String(error),
+        errorCode: (error as any)?.code || 'unknown'
       });
       
       throw error;
+    }
+  }
+
+  /**
+   * Check if a connection is valid and ready for operations
+   */
+  private isConnectionValid(connection: any): boolean {
+    try {
+      // Check if connection exists and has required methods
+      return connection && 
+             typeof connection.noop === 'function' &&
+             typeof connection.connect === 'function' &&
+             typeof connection.getMailboxLock === 'function';
+    } catch {
+      return false;
     }
   }
 

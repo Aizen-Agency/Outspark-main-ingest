@@ -20,6 +20,9 @@ export class IMAPService {
 
   constructor() {
     logger.info('IMAP Service initialized');
+    
+    // Start self-healing mechanism
+    this.startSelfHealing();
   }
 
   /**
@@ -273,11 +276,14 @@ export class IMAPService {
     }
   }
 
-  // Add fallback polling method with better debugging
+  // Add fallback polling method with better debugging and error handling
   private async fallbackToPolling(client: ImapFlow, accountId: string): Promise<void> {
     logger.warn(`Falling back to polling for account ${accountId} since IDLE failed`);
     
     let lastMessageCount = 0;
+    let consecutiveFailures = 0;
+    const maxConsecutiveFailures = 3;
+    
     try {
       // Get mailbox status using status() method
       const status = await client.status('INBOX', { messages: true });
@@ -285,6 +291,7 @@ export class IMAPService {
       logger.info(`Initial message count for polling: ${lastMessageCount}`, { accountId, lastMessageCount });
     } catch (error) {
       logger.error(`Failed to get initial message count for ${accountId}`, { accountId, error });
+      consecutiveFailures++;
     }
 
     // Poll every 30 seconds
@@ -298,9 +305,34 @@ export class IMAPService {
       try {
         logger.debug(`🔍 Polling check for account ${accountId}...`);
         
+        // Test connection health first
+        try {
+          await client.noop();
+        } catch (noopError) {
+          logger.warn(`Connection health check failed during polling for ${accountId}`, { 
+            accountId, 
+            error: noopError instanceof Error ? noopError.message : String(noopError) 
+          });
+          consecutiveFailures++;
+          
+          if (consecutiveFailures >= maxConsecutiveFailures) {
+            logger.error(`Too many consecutive failures for ${accountId}, stopping polling`, { 
+              accountId, 
+              consecutiveFailures 
+            });
+            clearInterval(pollInterval);
+            this.pollingIntervals.delete(accountId);
+            return;
+          }
+          return; // Skip this polling cycle
+        }
+        
         // Get current mailbox status
         const status = await client.status('INBOX', { messages: true });
         const currentMessageCount = status.messages || 0;
+        
+        // Reset failure count on successful operation
+        consecutiveFailures = 0;
         
         logger.debug(`Polling check complete`, { 
           accountId, 
@@ -329,7 +361,22 @@ export class IMAPService {
           });
         }
       } catch (error) {
-        logger.warn(`Polling check failed for ${accountId}`, { accountId, error });
+        consecutiveFailures++;
+        logger.warn(`Polling check failed for ${accountId}`, { 
+          accountId, 
+          error: error instanceof Error ? error.message : String(error),
+          consecutiveFailures,
+          maxConsecutiveFailures
+        });
+        
+        if (consecutiveFailures >= maxConsecutiveFailures) {
+          logger.error(`Too many consecutive polling failures for ${accountId}, stopping polling`, { 
+            accountId, 
+            consecutiveFailures 
+          });
+          clearInterval(pollInterval);
+          this.pollingIntervals.delete(accountId);
+        }
       }
     }, 30000); // Poll every 30 seconds
 
@@ -839,37 +886,75 @@ export class IMAPService {
     let client = this.clients.get(accountId);
     
     if (client && this.isConnectionHealthy(client)) {
-      return client;
+      // Test the connection with a NOOP to ensure it's actually working
+      try {
+        await client.noop();
+        return client;
+      } catch (error) {
+        logger.warn(`Connection health check failed for ${accountId}, recreating connection`, { 
+          accountId, 
+          error: error instanceof Error ? error.message : String(error) 
+        });
+        // Connection is not actually healthy, remove it
+        await this.removeAccount(accountId);
+        client = undefined;
+      }
     }
     
-    // If no connection or unhealthy, create a new one
+    // If no connection or unhealthy, create a new one with retry logic
     if (client) {
       await this.removeAccount(accountId);
     }
     
-    // Create new connection
-    const emailAccount: EmailAccount = {
-      id: account.id,
-      email: account.email,
-      password: account.imapPassword,
-      host: account.imapHost,
-      port: account.imapPort,
-      secure: account.imapPort === 993,
-      tls: account.imapPort === 993 || account.imapPort === 587,
-      tlsOptions: { rejectUnauthorized: false },
-      maxConcurrentConnections: config.maxConnectionsPerAccount,
-      retryAttempts: config.retryAttempts,
-      retryDelay: config.retryDelay,
-      isActive: account.isActive,
-      lastSync: new Date(),
-      createdAt: account.createdAt,
-      updatedAt: account.updatedAt
-    };
+    // Create new connection with retry logic
+    const maxRetries = 3;
+    let lastError: Error | null = null;
     
-    client = await this.createImapClient(emailAccount);
-    this.clients.set(accountId, client);
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        const emailAccount: EmailAccount = {
+          id: account.id,
+          email: account.email,
+          password: account.imapPassword,
+          host: account.imapHost,
+          port: account.imapPort,
+          secure: account.imapPort === 993,
+          tls: account.imapPort === 993 || account.imapPort === 587,
+          tlsOptions: { rejectUnauthorized: false },
+          maxConcurrentConnections: config.maxConnectionsPerAccount,
+          retryAttempts: config.retryAttempts,
+          retryDelay: config.retryDelay,
+          isActive: account.isActive,
+          lastSync: new Date(),
+          createdAt: account.createdAt,
+          updatedAt: account.updatedAt
+        };
+        
+        client = await this.createImapClient(emailAccount);
+        this.clients.set(accountId, client);
+        
+        logger.info(`Connection created successfully for ${accountId} (attempt ${attempt})`, { accountId });
+        return client;
+        
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        logger.warn(`Failed to create connection for ${accountId} (attempt ${attempt}/${maxRetries})`, { 
+          accountId, 
+          attempt, 
+          maxRetries,
+          error: lastError.message 
+        });
+        
+        if (attempt < maxRetries) {
+          // Wait before retrying with exponential backoff
+          const delay = Math.min(1000 * Math.pow(2, attempt - 1), 5000);
+          await this.delay(delay);
+        }
+      }
+    }
     
-    return client;
+    // All retries failed
+    throw new Error(`Failed to create connection for ${accountId} after ${maxRetries} attempts: ${lastError?.message || 'Unknown error'}`);
   }
 
   /**
@@ -999,6 +1084,101 @@ export class IMAPService {
       status[accountId] = isIdle;
     }
     return status;
+  }
+
+  /**
+   * Start self-healing mechanism to prevent connection issues
+   * This does what a restart does, but automatically
+   */
+  private startSelfHealing(): void {
+    // Check connection health every 5 minutes
+    setInterval(async () => {
+      await this.performSelfHealing();
+    }, 5 * 60 * 1000); // 5 minutes
+
+    // Clean up orphaned resources every 10 minutes
+    setInterval(async () => {
+      await this.cleanupOrphanedResources();
+    }, 10 * 60 * 1000); // 10 minutes
+
+    logger.info('Self-healing mechanism started - will check every 5 minutes');
+  }
+
+  /**
+   * Perform self-healing by validating and fixing connections
+   */
+  private async performSelfHealing(): Promise<void> {
+    logger.debug('Starting self-healing check...');
+    
+    const deadConnections: string[] = [];
+    let healthyConnections = 0;
+    
+    for (const [accountId, client] of this.clients) {
+      try {
+        // Test connection with NOOP
+        await client.noop();
+        healthyConnections++;
+        logger.debug(`Connection healthy: ${accountId}`);
+      } catch (error) {
+        logger.warn(`Dead connection detected during self-healing: ${accountId}`, {
+          accountId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+        deadConnections.push(accountId);
+      }
+    }
+    
+    // Clean up dead connections
+    for (const accountId of deadConnections) {
+      logger.info(`Self-healing: Removing dead connection for ${accountId}`);
+      await this.removeAccount(accountId);
+    }
+    
+    if (deadConnections.length > 0) {
+      logger.info(`Self-healing completed: Removed ${deadConnections.length} dead connections, ${healthyConnections} healthy`);
+    } else {
+      logger.debug(`Self-healing completed: All ${healthyConnections} connections healthy`);
+    }
+  }
+
+  /**
+   * Clean up orphaned resources (timers, event handlers, etc.)
+   */
+  private async cleanupOrphanedResources(): Promise<void> {
+    logger.debug('Starting orphaned resource cleanup...');
+    
+    // Clean up polling intervals for accounts that no longer exist
+    const orphanedIntervals: string[] = [];
+    for (const [accountId, interval] of this.pollingIntervals) {
+      if (!this.clients.has(accountId)) {
+        clearInterval(interval);
+        orphanedIntervals.push(accountId);
+      }
+    }
+    
+    // Remove orphaned intervals from map
+    for (const accountId of orphanedIntervals) {
+      this.pollingIntervals.delete(accountId);
+    }
+    
+    // Clean up idle connection status for accounts that no longer exist
+    const orphanedIdleStatus: string[] = [];
+    for (const [accountId, isIdle] of this.idleConnections) {
+      if (!this.clients.has(accountId)) {
+        orphanedIdleStatus.push(accountId);
+      }
+    }
+    
+    // Remove orphaned idle status
+    for (const accountId of orphanedIdleStatus) {
+      this.idleConnections.delete(accountId);
+    }
+    
+    if (orphanedIntervals.length > 0 || orphanedIdleStatus.length > 0) {
+      logger.info(`Resource cleanup completed: Removed ${orphanedIntervals.length} orphaned intervals, ${orphanedIdleStatus.length} orphaned idle statuses`);
+    } else {
+      logger.debug('Resource cleanup completed: No orphaned resources found');
+    }
   }
 }
 
