@@ -1,10 +1,10 @@
 import { logger, logEvent, logMetric } from './utils/logger';
 import { config, validateConfig, environment } from './config/index';
-import { getStats, healthCheck } from './services/memory-storage';
+import { getStats, healthCheck, setEmailAccount } from './services/memory-storage';
 import { close as closeSQS } from './services/aws-sqs';
 import { imapService } from './services/imap-service';
 import { startMonitoring, stopMonitoring } from './services/monitoring';
-import { EmailAccountsCredentials } from './types/index';
+import { EmailAccountsCredentials, EmailAccount } from './types/index';
 import { supabaseDatabaseService } from './services/supabase-database.service';
 
 let isShuttingDown = false;
@@ -234,6 +234,30 @@ async function initialize(): Promise<void> {
       logger.info(`Found ${emailAccounts.length} email accounts`);
     }
 
+    // Store accounts in memory storage for metrics tracking
+    logger.info('Storing accounts in memory storage...');
+    for (const account of emailAccounts) {
+      const emailAccount: EmailAccount = {
+        id: account.id,
+        email: account.email,
+        password: account.imapPassword,
+        host: account.imapHost,
+        port: account.imapPort,
+        secure: account.imapPort === 993,
+        tls: account.imapPort === 993 || account.imapPort === 587,
+        tlsOptions: { rejectUnauthorized: false },
+        maxConcurrentConnections: config.maxConnectionsPerAccount,
+        retryAttempts: config.retryAttempts,
+        retryDelay: config.retryDelay,
+        isActive: account.isActive,
+        lastSync: new Date(),
+        createdAt: account.createdAt,
+        updatedAt: account.updatedAt
+      };
+      setEmailAccount(emailAccount);
+    }
+    logger.info(`Stored ${emailAccounts.length} accounts in memory storage`);
+
     // Initialize IMAP service with the accounts data
     logger.info('Initializing IMAP service...');
     if (emailAccounts.length > 0) {
@@ -319,7 +343,31 @@ function setupPeriodicHealthChecks(): void {
   // Account refresh every 10 minutes (NEW)
   setInterval(async () => {
     try {
-      await getEmailAccounts();
+      const newAccounts = await getEmailAccounts();
+      if (newAccounts.length > 0) {
+        // Update memory storage with new accounts
+        for (const account of newAccounts) {
+          const emailAccount: EmailAccount = {
+            id: account.id,
+            email: account.email,
+            password: account.imapPassword,
+            host: account.imapHost,
+            port: account.imapPort,
+            secure: account.imapPort === 993,
+            tls: account.imapPort === 993 || account.imapPort === 587,
+            tlsOptions: { rejectUnauthorized: false },
+            maxConcurrentConnections: config.maxConnectionsPerAccount,
+            retryAttempts: config.retryAttempts,
+            retryDelay: config.retryDelay,
+            isActive: account.isActive,
+            lastSync: new Date(),
+            createdAt: account.createdAt,
+            updatedAt: account.updatedAt
+          };
+          setEmailAccount(emailAccount);
+        }
+        logger.info(`Refreshed ${newAccounts.length} accounts in memory storage`);
+      }
     } catch (error) {
       logger.error('Account refresh failed', error as Error);
     }
