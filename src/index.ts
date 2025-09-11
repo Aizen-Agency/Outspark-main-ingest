@@ -261,9 +261,18 @@ async function initialize(): Promise<void> {
     // Initialize IMAP service with the accounts data
     logger.info('Initializing IMAP service...');
     if (emailAccounts.length > 0) {
-      await imapService.initializeAllAccounts(emailAccounts);
+      try {
+        await imapService.initializeAllAccounts(emailAccounts);
+        logger.info('IMAP service initialized successfully');
+      } catch (imapError) {
+        logger.error('IMAP service initialization failed, but continuing with available connections', {
+          error: imapError instanceof Error ? imapError.message : String(imapError)
+        });
+        // Don't fail the entire service - let it continue with partial functionality
+      }
+    } else {
+      logger.info('No email accounts to initialize');
     }
-    logger.info('IMAP service initialized');
 
     // Initialize monitoring service
     logger.info('Initializing monitoring service...');

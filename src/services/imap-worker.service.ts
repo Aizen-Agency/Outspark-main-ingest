@@ -4,6 +4,7 @@ import { config } from '../config/index';
 import { sendMessage, sendMessageBatch } from './aws-sqs';
 import { imapService } from './imap-service';
 import { pollingScheduler } from './polling-scheduler.service';
+import { parseEmailMessage, isMessageTooLarge, truncateMessage } from '../utils/email-parser';
 import { 
   EmailAccount, 
   EmailMessage, 
@@ -465,7 +466,7 @@ export class ImapWorker {
         // Process each message in the batch
         for await (const message of messageBatch) {
           try {
-            const emailData = this.parseEmail(message, accountId);
+            const emailData = await this.parseEmail(message, accountId);
             
             // Validate email data
             if (!emailData.messageId || !emailData.internalMessageId) {
@@ -563,58 +564,91 @@ export class ImapWorker {
   }
 
   /**
-   * Parse IMAP message to comprehensive format
+   * Parse IMAP message to comprehensive format using proper email parsing
    */
-  private parseEmail(message: FetchMessageObject, accountId: string): any {
-    const envelope = message.envelope;
-    if (!envelope) {
+  private async parseEmail(message: FetchMessageObject, accountId: string): Promise<any> {
+    try {
+      // Use the new email parser for proper handling of encoding and MIME structure
+      const parsedData = await parseEmailMessage(
+        message.source || Buffer.alloc(0),
+        accountId,
+        message.uid || 0
+      );
+      
+      // Check if message is too large for SQS
+      if (isMessageTooLarge(parsedData.text)) {
+        logger.warn('Message too large for SQS, truncating text content', {
+          workerId: this.workerId,
+          accountId,
+          messageId: parsedData.messageId,
+          textLength: parsedData.text.length
+        });
+        
+        // Truncate the text content but keep other metadata
+        parsedData.text = truncateMessage(parsedData.text);
+      }
+      
+      return parsedData;
+      
+    } catch (error) {
+      logger.error('Failed to parse email message, using fallback', {
+        workerId: this.workerId,
+        accountId,
+        messageUid: message.uid,
+        error: error instanceof Error ? error.message : String(error)
+      });
+      
+      // Fallback to envelope-based parsing if mailparser fails
+      const envelope = message.envelope;
+      if (!envelope) {
+        return {
+          accountId,
+          messageId: '',
+          internalMessageId: `${accountId}_${message.uid}_${Date.now()}`,
+          threadId: '',
+          inReplyTo: '',
+          references: [],
+          from: '',
+          to: [],
+          subject: '',
+          text: message.source?.toString() || '',
+          receivedAt: new Date(),
+          timestamp: new Date().toISOString(),
+          isReply: false
+        };
+      }
+      
+      // Extract and clean email addresses
+      const fromAddress = envelope.from?.[0]?.address || '';
+      const toAddresses = envelope.to?.map(addr => addr.address).filter(Boolean) || [];
+      
+      // Extract threading information
+      const originalMessageId = envelope.messageId || '';
+      const inReplyTo = envelope.inReplyTo || '';
+      const references = (envelope as any).references || [];
+      
+      // Determine if this is a reply based on threading headers
+      const isReply = Boolean(inReplyTo || references.length > 0);
+      
+      // Generate internal message ID for tracking
+      const internalMessageId = `${accountId}_${message.uid}_${Date.now()}`;
+      
       return {
         accountId,
-        messageId: '',
-        internalMessageId: `${accountId}_${message.uid}_${Date.now()}`,
-        threadId: '',
-        inReplyTo: '',
-        references: [],
-        from: '',
-        to: [],
-        subject: '',
+        messageId: originalMessageId,
+        internalMessageId,
+        threadId: inReplyTo,
+        inReplyTo,
+        references,
+        from: fromAddress,
+        to: toAddresses,
+        subject: envelope.subject || '',
         text: message.source?.toString() || '',
-        receivedAt: new Date(),
-        timestamp: new Date().toISOString(),
-        isReply: false
+        receivedAt: envelope.date || new Date(),
+        timestamp: (envelope.date || new Date()).toISOString(),
+        isReply
       };
     }
-    
-    // Extract and clean email addresses
-    const fromAddress = envelope.from?.[0]?.address || '';
-    const toAddresses = envelope.to?.map(addr => addr.address).filter(Boolean) || [];
-    
-    // Extract threading information
-    const originalMessageId = envelope.messageId || '';
-    const inReplyTo = envelope.inReplyTo || '';
-    const references = (envelope as any).references || [];
-    
-    // Determine if this is a reply based on threading headers
-    const isReply = Boolean(inReplyTo || references.length > 0);
-    
-    // Generate internal message ID for tracking
-    const internalMessageId = `${accountId}_${message.uid}_${Date.now()}`;
-    
-    return {
-      accountId,
-      messageId: originalMessageId,
-      internalMessageId,
-      threadId: inReplyTo,
-      inReplyTo,
-      references,
-      from: fromAddress,
-      to: toAddresses,
-      subject: envelope.subject || '',
-      text: message.source?.toString() || '',
-      receivedAt: envelope.date || new Date(),
-      timestamp: (envelope.date || new Date()).toISOString(),
-      isReply
-    };
   }
 
   /**
